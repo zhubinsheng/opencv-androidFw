@@ -44,12 +44,17 @@ import org.opencv.jni.JniBridge;
 import org.opencv.objdetect.CascadeClassifier;
 import org.opencv.core.MatOfDouble;
 
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class MainActivity extends CameraActivity implements
         CameraBridgeViewBase.CvCameraViewListener2, View.OnClickListener{
@@ -65,6 +70,8 @@ public class MainActivity extends CameraActivity implements
     private Net net;
     private ImageView imageView;
 
+    private ExecutorService singleThreadExecutor =  Executors.newFixedThreadPool(10);;
+
     String sdPath = "/sdcard/opencv";
 //        String image_file = sdPath + File.separator + "dog.jpg";
 //        System.out.println("Reading File"+image_file);
@@ -78,11 +85,11 @@ public class MainActivity extends CameraActivity implements
             "diningtable","dog","horse","motorbike","person",
             "pottedplant","sheep","sofa","train","tvmonitor"
     };
-
-
+    private List<String> classNamesVec = new ArrayList<>();
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
                 != PackageManager.PERMISSION_GRANTED) {
@@ -133,8 +140,6 @@ public class MainActivity extends CameraActivity implements
 //            e.printStackTrace();
 //        }
 
-        setContentView(R.layout.activity_main);
-
         String cfg_path= sdPath + File.separator + "yolov4-tiny.cfg";
         String model_path= sdPath + File.separator + "yolov4-tiny.weights";
         net = Dnn.readNetFromDarknet(cfg_path, model_path);
@@ -147,6 +152,19 @@ public class MainActivity extends CameraActivity implements
 //            System.out.println("Reading Image error");
 //        }
 
+        try {   //读取names
+            File file = new File(sdPath + File.separator +"coco.names");
+            InputStream instream = new FileInputStream(file);
+            InputStreamReader inputreader = new InputStreamReader(instream);
+            BufferedReader buffreader = new BufferedReader(inputreader);
+            String line;
+            while ((line = buffreader.readLine()) != null) {
+                classNamesVec.add(line);
+            }
+            instream.close();
+        }catch (Exception e) {
+            e.printStackTrace();
+        }
 
     }
 
@@ -259,6 +277,7 @@ public class MainActivity extends CameraActivity implements
         return list;
     }
 
+    int i  =0;
     @Override
     // 这里执行人脸检测的逻辑, 根据OpenCV提供的例子实现(face-detection)
     public Mat onCameraFrame(CameraBridgeViewBase.CvCameraViewFrame inputFrame) {
@@ -290,71 +309,94 @@ public class MainActivity extends CameraActivity implements
         for (Rect faceRect : facesArray) {
             Imgproc.rectangle(mRgba, faceRect.tl(), faceRect.br(), faceRectColor, 3);
         }
+        Mat im = new Mat();
+        Imgproc.cvtColor(mRgba, im, Imgproc.COLOR_RGBA2RGB);
 
+        Mat frame = new Mat();
+        Size sz1 = new Size(im.cols(),im.rows());
+        Imgproc.resize(im, frame, sz1);
+        Mat resized = new Mat();
+        Size sz = new Size(320,320);
+        Imgproc.resize(im, resized, sz);
+        float scale = 1.0F / 255.0F;
+        Mat inputBlob = Dnn.blobFromImage(im, scale, sz, new Scalar(0), false, false);
 
+        net.setInput(inputBlob, "data");//
 
+        singleThreadExecutor.execute((Runnable) () -> {
+            Mat detectionMat = net.forward();
+            if( detectionMat.empty() ) {
+                System.out.println("No result");
+            }
+            System.out.println("No result"+detectionMat.rows());
 
+            for (int i = 0; i < detectionMat.rows(); i++)
+            {
+                int probability_index = 5;
+                int size = (int) (detectionMat.cols() * detectionMat.channels());
+                float[] data = new float[size];
+                detectionMat.get(i, 0, data);
+                float confidence = -1;
+                int objectClass = -1;
+                for (int j=0; j < detectionMat.cols();j++)
+                {
+                    if (j>=probability_index && confidence<data[j])
+                    {
+                        confidence = data[j];
+                        objectClass = j-probability_index;
+                    }
+                }
 
-//        Mat im = mRgba;
-//        Mat frame = new Mat();
-//        Size sz1 = new Size(im.cols(),im.rows());
-//        Imgproc.resize(im, frame, sz1);
-//        Mat resized = new Mat();
-//        Size sz = new Size(320,320);
-//        Imgproc.resize(im, resized, sz);
-//        float scale = 1.0F / 255.0F;
-//        Mat inputBlob = Dnn.blobFromImage(im, scale, sz, new Scalar(0), false, false);
-//        net.setInput(inputBlob, "data");//
-//        Mat detectionMat = net.forward();
-//        if( detectionMat.empty() ) {
-//            System.out.println("No result");
-//        }
+                if (confidence > 0.1)
+                {
+                    System.out.println("Result Object: "+i);
+                    for (int j=0; j < detectionMat.cols();j++) {
+                        System.out.print(" "+j+":"+ data[j]);
+                    }
+                    System.out.println("");
+                    float x = data[0];
+                    float y = data[1];
+                    float width = data[2];
+                    float height = data[3];
+                    float xLeftBottom = (x - width / 2) * frame.cols();
+                    float yLeftBottom = (y - height / 2) * frame.rows();
+                    float xRightTop = (x + width / 2) * frame.cols();
+                    float yRightTop = (y + height / 2) * frame.rows();
+                    System.out.println("Class: "+ classNamesVec.get(objectClass));
+                    System.out.println("Confidence: "+confidence);
+                    System.out.println("ROI: "+xLeftBottom+" "+yLeftBottom+" "+xRightTop+" "+yRightTop+"\n");
+
+                    Imgproc.rectangle(frame, new Point(xLeftBottom, yLeftBottom),
+                            new Point(xRightTop,yRightTop),new Scalar(0, 255, 0),3);
+                    // Write class name and confidence.
+                    String label = classNamesVec.get(objectClass) + ": " + confidence;
+                    Imgproc.putText(frame, label, new Point(xLeftBottom, xLeftBottom),
+                            Imgproc.FONT_HERSHEY_SIMPLEX, 0.5, new Scalar(0, 0, 0));
+                    System.out.println("i  i  i: "+i);
+
+//                    if (i < 30){
+//                        i++;
+//                        File file =
+//                                new File(sdPath+ File.separator +"/result"+ File.separator + i +"qwert.jpg");
+//                        System.out.println("file where: "+file.getPath());
 //
-//        for (int i = 0; i < detectionMat.rows(); i++)
-//        {
-//            int probability_index = 5;
-//            int size = (int) (detectionMat.cols() * detectionMat.channels());
-//            float[] data = new float[size];
-//            detectionMat.get(i, 0, data);
-//            float confidence = -1;
-//            int objectClass = -1;
-//            for (int j=0; j < detectionMat.cols();j++)
-//            {
-//                if (j>=probability_index && confidence<data[j])
-//                {
-//                    confidence = data[j];
-//                    objectClass = j-probability_index;
-//                }
-//            }
+//                        if (!file.exists()) {
+//                            try {
+//                                System.out.println("No file");
+//                                file.createNewFile();
+//                            } catch (IOException e) {
+//                                e.printStackTrace();
+//                            }
+//                        }
+//                        Imgcodecs.imwrite(file.getPath(), frame);
+//                        System.out.println("imwrite success");
 //
-//            if (confidence > 0.7)
-//            {
-////                System.out.println("Result Object: "+i);
-//                for (int j=0; j < detectionMat.cols();j++) {
-////                    System.out.print(" "+j+":"+ data[j]);
-//                }
-////                System.out.println("");
-//                float x = data[0];
-//                float y = data[1];
-//                float width = data[2];
-//                float height = data[3];
-//                float xLeftBottom = (x - width / 2) * frame.cols();
-//                float yLeftBottom = (y - height / 2) * frame.rows();
-//                float xRightTop = (x + width / 2) * frame.cols();
-//                float yRightTop = (y + height / 2) * frame.rows();
-//                System.out.println("Class: "+ names[objectClass]);
-//                System.out.println("Confidence: "+confidence);
-//                System.out.println("ROI: "+xLeftBottom+" "+yLeftBottom+" "+xRightTop+" "+yRightTop+"\n");
-//
-//                Imgproc.rectangle(frame, new Point(xLeftBottom, yLeftBottom),
-//                        new Point(xRightTop,yRightTop),new Scalar(0, 255, 0),3);
-//            }
-//        }
+//                    }
+                }
+            }
+        });
 
-//        Imgcodecs.imwrite(sdPath + File.separator +"out.jpg", frame );
-
-
-        return mRgba;
+        return frame;
     }
     @Override
     protected void onPause() {
